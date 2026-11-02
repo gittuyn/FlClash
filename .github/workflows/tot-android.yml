@@ -1,0 +1,103 @@
+name: Android arm64 APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Validate and configure signing
+        shell: bash
+        env:
+          KEYSTORE: ${{ secrets.KEYSTORE }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -eu
+          for name in KEYSTORE KEY_ALIAS STORE_PASSWORD KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Required signing secret $name is missing"
+              exit 1
+            fi
+          done
+          printf '%s' "$KEYSTORE" | base64 --decode > android/app/keystore.jks
+          test -s android/app/keystore.jks
+          python3 -c 'import json, os
+          pairs = (("keyAlias", "KEY_ALIAS"), ("storePassword", "STORE_PASSWORD"), ("keyPassword", "KEY_PASSWORD"))
+          with open("android/local.properties", "a", encoding="ascii") as output:
+              for key, env in pairs:
+                  value = json.dumps(os.environ[env], ensure_ascii=True)[1:-1].replace(" ", "\\ ")
+                  output.write(f"{key}={value}\n")'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: core/go.sum
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.47.6'
+
+      - name: Setup NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28c
+          add-to-path: true
+          link-to-sdk: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Fetch CA certificates
+        shell: bash
+        run: |
+          bundle=core/Clash.Meta/component/ca/ca-certificates.crt
+          curl -fsSL --retry 3 -o "$bundle" https://curl.se/ca/cacert-2026-09-25.pem
+          echo "a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505  $bundle" | sha256sum -c -
+
+      - name: Build Android arm64 APK
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: dart setup.dart android --arch arm64 --env stable -v
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find dist -type f -name '*.apk')
+          test "${#apks[@]}" -eq 1
+          tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          "$tools/apksigner" verify --verbose --print-certs "${apks[0]}" | tee /tmp/apk-signature.txt
+          grep -Fi 'Signer #1 certificate SHA-256 digest: 2e46e497fe5659d2fdf3e412fc4405574f07c8daa80c8242e5a3bcb194fa02bd' /tmp/apk-signature.txt
+          "$tools/aapt" dump badging "${apks[0]}" | grep -F "package: name='io.github.gittuyn.tot'"
+          unzip -Z1 "${apks[0]}" | grep -F 'lib/arm64-v8a/'
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: flclash-tot-android-arm64
+          path: dist/**/*.apk
+          if-no-files-found: error
