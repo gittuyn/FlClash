@@ -91,7 +91,8 @@ jobs:
           test "${#apks[@]}" -eq 1
           tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
           "$tools/apksigner" verify --verbose --print-certs "${apks[0]}" | tee /tmp/apk-signature.txt
-          grep -Fi 'Signer #1 certificate SHA-256 digest: 2e46e497fe5659d2fdf3e412fc4405574f07c8daa80c8242e5a3bcb194fa02bd' /tmp/apk-signature.txt
+          grep -Fx 'Number of signers: 1' /tmp/apk-signature.txt
+          grep -Fi 'V2 Signer: certificate SHA-256 digest: 2e46e497fe5659d2fdf3e412fc4405574f07c8daa80c8242e5a3bcb194fa02bd' /tmp/apk-signature.txt
           "$tools/aapt" dump badging "${apks[0]}" | grep -F "package: name='io.github.gittuyn.tot'"
           unzip -Z1 "${apks[0]}" | grep -F 'lib/arm64-v8a/'
 
