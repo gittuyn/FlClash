@@ -1,19 +1,85 @@
 name: Android arm64 APK
 
 on:
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: tot-upstream-release
+  cancel-in-progress: false
+
 jobs:
-  build:
+  detect:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      build: ${{ steps.release.outputs.build }}
+      publish: ${{ steps.release.outputs.publish }}
+    steps:
+      - name: Detect latest stable upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$(gh api repos/chen08209/FlClash/releases/latest --jq '.tag_name')
+          if [[ ! "$tag" =~ ^v[0-9]+([.][0-9]+)+$ ]]; then
+            echo "::error::Unexpected upstream release tag: $tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          status=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/tot-$tag" --silent --include 2>&1) && exists=true || {
+            if [[ "$status" == *'(HTTP 404)'* ]]; then
+              exists=false
+            else
+              echo "::error::Could not check existing release: $status"
+              exit 1
+            fi
+          }
+          if [[ "$exists" == false ]]; then
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$exists" == false || "$EVENT_NAME" == workflow_dispatch ]]; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'build=false' >> "$GITHUB_OUTPUT"
+            echo "ToT release tot-$tag already exists."
+          fi
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          fetch-depth: 0
+
+      - name: Merge the exact upstream release
+        env:
+          UPSTREAM_TAG: ${{ needs.detect.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags https://github.com/chen08209/FlClash.git "refs/tags/$UPSTREAM_TAG"
+          upstream_commit=$(git rev-parse 'FETCH_HEAD^{commit}')
+          if ! git merge-base --is-ancestor "$upstream_commit" HEAD; then
+            git merge --no-edit --no-ff "$upstream_commit"
+          fi
+          git submodule update --init --recursive
 
       - name: Validate and configure signing
         shell: bash
@@ -93,8 +159,11 @@ jobs:
           "$tools/apksigner" verify --verbose --print-certs "${apks[0]}" | tee /tmp/apk-signature.txt
           grep -Fx 'Number of signers: 1' /tmp/apk-signature.txt
           grep -Fi 'V2 Signer: certificate SHA-256 digest: 2e46e497fe5659d2fdf3e412fc4405574f07c8daa80c8242e5a3bcb194fa02bd' /tmp/apk-signature.txt
-          "$tools/aapt" dump badging "${apks[0]}" | grep -F "package: name='io.github.gittuyn.tot'"
-          unzip -Z1 "${apks[0]}" | grep -F 'lib/arm64-v8a/'
+          "$tools/aapt" dump badging "${apks[0]}" > /tmp/apk-badging.txt
+          grep -F "package: name='io.github.gittuyn.tot'" /tmp/apk-badging.txt
+          grep -Fx "application-label:'ToT'" /tmp/apk-badging.txt
+          unzip -Z1 "${apks[0]}" > /tmp/apk-files.txt
+          grep -Fx 'lib/arm64-v8a/libclash.so' /tmp/apk-files.txt
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -102,3 +171,23 @@ jobs:
           name: flclash-tot-android-arm64
           path: dist/**/*.apk
           if-no-files-found: error
+
+      - name: Push verified upstream merge
+        if: needs.detect.outputs.publish == 'true'
+        run: git push origin HEAD:refs/heads/main
+
+      - name: Publish ToT release
+        if: needs.detect.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ needs.detect.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find dist -type f -name '*.apk')
+          test "${#apks[@]}" -eq 1
+          gh release create "tot-$UPSTREAM_TAG" "${apks[0]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$(git rev-parse HEAD)" \
+            --title "ToT $UPSTREAM_TAG" \
+            --notes "ToT arm64-v8a build based on upstream FlClash $UPSTREAM_TAG. Independently signed. Source and license are available in this repository."
