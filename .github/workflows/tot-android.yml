@@ -79,7 +79,7 @@ jobs:
           if ! git merge-base --is-ancestor "$upstream_commit" HEAD; then
             git merge --no-edit --no-ff "$upstream_commit"
           fi
-          git submodule update --init --recursive
+          git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init --recursive
 
       - name: Validate and configure signing
         shell: bash
